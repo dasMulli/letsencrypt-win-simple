@@ -1,11 +1,16 @@
-﻿using Microsoft.Web.Administration;
+﻿using Microsoft.AspNetCore.Hosting;
+using Microsoft.Web.Administration;
 using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices.ComTypes;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace LetsEncrypt.ACME.Simple
 {
@@ -13,6 +18,7 @@ namespace LetsEncrypt.ACME.Simple
     {
         private Version _iisVersion = GetIisVersion();
         private IdnMapping _idnMapping = new IdnMapping();
+        private IDictionary<string, IWebHost> webHosts = new Dictionary<string, IWebHost>();
         public const string PluginName = "IIS";
 
         public override string Name => PluginName;
@@ -149,33 +155,6 @@ namespace LetsEncrypt.ACME.Simple
                 }
             }
             return new List<Target>();
-        }
-
-        private readonly string _sourceFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "web_config.xml");
-
-        private void UnlockSection(string path)
-        {
-            // Unlock handler section
-            using (var sm = new ServerManager())
-            {
-                var config = sm.GetApplicationHostConfiguration();
-                var section = config.GetSection(path);
-                if (section.OverrideModeEffective == OverrideMode.Deny)
-                {
-                    section.OverrideMode = OverrideMode.Allow;
-                    sm.CommitChanges();
-                    Program.Log.Warning("Unlocked section {section}", path);
-                }
-            }
-        }
-
-        public override void BeforeAuthorize(Target target, string answerPath, string token)
-        {
-            UnlockSection("system.webServer/handlers");
-            var directory = Path.GetDirectoryName(answerPath);
-            var webConfigPath = Path.Combine(directory, "web.config");
-            Program.Log.Debug("Writing web.config to {webConfigPath}", webConfigPath);
-            File.Copy(_sourceFilePath, webConfigPath, true);
         }
 
         public override void Install(Target target, string pfxFilename, X509Store store, X509Certificate2 certificate)
@@ -342,62 +321,32 @@ namespace LetsEncrypt.ACME.Simple
 
         public override void DeleteAuthorization(string answerPath, string token, string webRootPath, string filePath)
         {
-            Program.Log.Debug("Deleting answer");
-            try
+            IWebHost webHost;
+            if (webHosts.TryGetValue(answerPath, out webHost))
             {
-                var answerFileInfo = new FileInfo(answerPath);
-                if (answerFileInfo.Exists)
-                {
-                    answerFileInfo.Delete();
-                }
-
-                if (Properties.Settings.Default.CleanupFolders == true)
-                {
-                    var answerDirectoryInfo = answerFileInfo.Directory;
-                    var children = answerDirectoryInfo.GetFileSystemInfos();
-                    if (children.Length == 1)
-                    {
-                        if (children.First().Name.ToLower() == "web.config")
-                        {
-                            Program.Log.Debug("Deleting web.config");
-                            children.First().Delete();
-                            Program.Log.Debug("Deleting {folderPath}", answerDirectoryInfo.FullName);
-                            answerDirectoryInfo.Delete();
-
-                            var filePathFirstDirectory = answerDirectoryInfo.Parent;
-                            if (filePathFirstDirectory.GetFileSystemInfos().Length == 0)
-                            {
-                                Program.Log.Debug("Deleting {filePathFirstDirectory}", filePathFirstDirectory.FullName);
-                                filePathFirstDirectory.Delete();
-                            }
-                            else
-                            {
-                                Program.Log.Debug("Additional files or folders exist in {folderPath}, not deleting.", filePathFirstDirectory.FullName);
-                            }
-                        }
-                        else
-                        {
-                            Program.Log.Debug("Unexpected file discovered in {folderPath}, not deleting.", answerDirectoryInfo.FullName);
-                        }
-                    }
-                    else
-                    {
-                        Program.Log.Debug("Additional files or folders exist in {folderPath} not deleting.", answerDirectoryInfo.FullName);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Program.Log.Warning("Error occured while deleting folder structure. Error: {@ex}", ex);
+                webHosts.Remove(answerPath);
+                webHost.StopAsync().GetAwaiter().GetResult();
             }
         }
 
         public override void CreateAuthorizationFile(string answerPath, string fileContents)
         {
-            Program.Log.Debug("Writing challenge answer to {answerPath}", answerPath);
-            var directory = Path.GetDirectoryName(answerPath);
-            Directory.CreateDirectory(directory);
-            File.WriteAllText(answerPath, fileContents);
+            var webHost = new WebHostBuilder()
+                .UseHttpSys(
+                    options =>
+                    {
+                        options.UrlPrefixes.Add(answerPath);
+                    })
+                .Configure(app => app.Run(
+                    async ctx =>
+                    {
+                        await ctx.Response.WriteAsync(fileContents);
+                    }))
+                .Build();
+            
+            webHost.Start();
+
+            webHosts[answerPath] = webHost;
         }
 
         protected Site GetSite(Target target, ServerManager iisManager)

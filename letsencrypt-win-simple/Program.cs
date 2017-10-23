@@ -1107,14 +1107,12 @@ namespace LetsEncrypt.ACME.Simple
         private static Action<AuthorizationState> PrepareHttpChallenge(Target target, AuthorizeChallenge challenge, out string answerUri)
         {
             var webRootPath = Environment.ExpandEnvironmentVariables(target.WebRootPath);
-            var httpChallenge = challenge.Challenge as HttpChallenge;
-            var filePath = httpChallenge.FilePath.Replace('/', '\\');
-            var answerPath = $"{webRootPath.TrimEnd('\\')}\\{filePath.TrimStart('\\')}";
+            var httpChallenge = (HttpChallenge) challenge.Challenge;
 
-            target.Plugin.CreateAuthorizationFile(answerPath, httpChallenge.FileContent);
-            target.Plugin.BeforeAuthorize(target, answerPath, httpChallenge.Token);
+            var challengeUri = answerUri = httpChallenge.FileUrl;
 
-            answerUri = httpChallenge.FileUrl;
+            target.Plugin.CreateAuthorizationFile(challengeUri, httpChallenge.FileContent);
+            target.Plugin.BeforeAuthorize(target, challengeUri, httpChallenge.Token);
 
             Log.Information("Answer should now be browsable at {answerUri}", answerUri);
             if (Options.Test && !Options.Renew)
@@ -1135,7 +1133,7 @@ namespace LetsEncrypt.ACME.Simple
             {
                 if (authzState.Status == "valid")
                 {
-                    target.Plugin.DeleteAuthorization(answerPath, httpChallenge.Token, webRootPath, filePath);
+                    target.Plugin.DeleteAuthorization(challengeUri, httpChallenge.Token, webRootPath, challengeUri);
                 }
             };
         }
